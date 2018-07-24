@@ -35,11 +35,13 @@ def get_passbolt_response(session: GPGAuthSession, path: str, params: Mapping[st
         params = {}
 
     params = dict(base_params, **params)
-    response = getattr(session, method)(session.build_absolute_uri(path), params=params, **kwargs)
+    full_path = session.build_absolute_uri(path)
+    logger.info("Sending Passbolt request to %s with params %s, kwargs %s", full_path, params, kwargs)
+    response = getattr(session, method)(full_path, params=params, **kwargs)
 
     if not response.ok:
-        logger.error("Got non-ok response from server (status code %s). Contents: %s", response.status_code,
-                     response.text)
+        logger.error("Got non-ok response from server (status code %s). Contents: %s. Sent data: %s",
+                     response.status_code, response.text, params)
         raise HttpRequestError(response)
 
     return response.json()['body']
@@ -49,23 +51,25 @@ def get_resources(session: GPGAuthSession, favourite_only: bool) -> Iterable[Dic
     """
     Return a list of resource dicts from Passbolt.
     """
-    params = {'contain[secret]': 1}
+    params = {'contain[secret]': 1, 'contain[tag]': 1}
     if favourite_only:
         params['filter[is-favorite]'] = 1
 
     return get_passbolt_response(session, '/resources.json', params)
 
 
-def share_resource(session: GPGAuthSession, resource_id: str, data: Dict[str, str]) -> Dict[str, Any]:
+def share_resource(session: GPGAuthSession, resource_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Share the resource identified by `resource_id`.
+    Share the resource identified by `resource_id` and with the given data. Check
+    `translators.foreign.to_foreign_secret` and `translators.foreign.to_shared_permission` for the expected data
+    structure.
     """
-    return get_passbolt_response(session, '/share/resource/{}.json'.format(resource_id), method='put', data=data)
+    return get_passbolt_response(session, '/share/resource/{}.json'.format(resource_id), method='put', json=data)
 
 
 def get_users(session: GPGAuthSession, terms: str = None) -> Iterable[Dict[str, Any]]:
     """
-    Return a list of user dicts from Passbolt.
+    Return a list of user dicts from Passbolt, optionally filtered with the given `terms`.
     """
     params = {'keywords': terms} if terms else {}
 
@@ -80,15 +84,43 @@ def get_user(session: GPGAuthSession, id: str) -> Dict[str, Any]:
     return get_passbolt_response(session, '/users/{}.json'.format(id))
 
 
-def get_groups(session: GPGAuthSession) -> Iterable[Dict[str, Any]]:
+def get_groups(session: GPGAuthSession, include_users: bool = True) -> Iterable[Dict[str, Any]]:
     """
-    Return a list of group dicts from Passbolt.
+    Return a list of group dicts from Passbolt. If `include_users` is `True`, user information is returned along with
+    the groups.
     """
-    return get_passbolt_response(session, '/groups.json')
+    endpoint = '/groups.json'
+
+    if include_users:
+        endpoint += '?contain[user]=1'
+
+    return get_passbolt_response(session, endpoint)
 
 
-def add_resource(session: GPGAuthSession, resource_data: Dict[str, Any]) -> Dict[str, Any]:
+def get_group(session: GPGAuthSession, id: str) -> Dict[str, Any]:
     """
-    Add the given resource to Passbolt.
+    Return a group dict from Passbolt.
     """
-    return get_passbolt_response(session, '/resources.json', method='post', data=resource_data)
+    return get_passbolt_response(session, '/groups/{}.json'.format(id))
+
+
+def add_resource(session: GPGAuthSession, resource_data: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Add the given resource to Passbolt. See `translators.foreign.to_foreign_resource` for the expected data structure.
+    """
+    return get_passbolt_response(session, '/resources.json', method='post', json=resource_data)
+
+
+def get_resource_permissions(session: GPGAuthSession, resource_id: str) -> Iterable[Mapping[str, Any]]:
+    """
+    Return the existing permissions of the given resource id.
+    """
+    return get_passbolt_response(session, '/permissions/resource/{}.json'.format(resource_id))
+
+
+def add_tags(session: GPGAuthSession, resource_id: str, tag_data: Dict[str, Any]) -> None:
+    """
+    Add the given `tag_data` to the resource identified by `resource_id`. `tag_data` should be a dict in the form
+    `{'Tags': ['tag1', 'tag2', '#public_tag_1']}`.
+    """
+    return get_passbolt_response(session, '/tags/{}.json'.format(resource_id), json=tag_data, method='post')

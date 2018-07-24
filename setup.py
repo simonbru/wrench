@@ -10,6 +10,7 @@ sys.path.append(src_root_dir)
 
 tests_require = [
     'pytest',
+    'pytest-cov',
     'factory-boy',
 ]
 
@@ -24,7 +25,7 @@ version = __import__('wrench').__version__
 setup(
     name='passbolt-wrench',
     version=version,
-    package_dir={"": src_root_dir},
+    package_dir={"": 'src'},
     packages=find_packages(
         where=src_root_dir
     ),
@@ -43,7 +44,6 @@ setup(
     classifiers=[
         'Environment :: Console',
         'Development Status :: 5 - Production/Stable',
-        'Programming Language :: Python :: 3.4',
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
     ]

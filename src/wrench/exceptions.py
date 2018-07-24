@@ -5,6 +5,10 @@ class WrenchError(Exception):
     ...
 
 
+class DecryptionError(WrenchError):
+    ...
+
+
 class InputValidationError(WrenchError):
     ...
 
@@ -16,3 +20,8 @@ class HttpRequestError(WrenchError):
 
 class FingerprintMismatchError(WrenchError):
     ...
+
+
+class ImportParseError(WrenchError):
+    def __init__(self, lineno):
+        self.lineno = lineno

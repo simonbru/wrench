@@ -1,6 +1,7 @@
+from typing import List  # noqa
+
 import factory
-from wrench.resources import PermissionType, Resource, SharedSecret
-from wrench.users import GpgKey, Group, User
+from wrench.models import GpgKey, Group, Permission, PermissionType, Resource, Secret, User
 
 
 class ResourceFactory(factory.Factory):
@@ -13,6 +14,16 @@ class ResourceFactory(factory.Factory):
     description = factory.Faker('sentence')
     username = factory.Faker('user_name')
     secret = factory.Faker('password')
+    encrypted_secret = None
+    tags = []  # type: List[str]
+
+
+class EncryptedResourceFactory(ResourceFactory):
+    encrypted_secret = factory.LazyAttribute(lambda o: o.gpg.encrypt(o.secret, o.recipient))
+
+    class Params:
+        gpg = None
+        recipient = None
 
 
 class GpgKeyFactory(factory.Factory):
@@ -38,18 +49,38 @@ class UserFactory(factory.Factory):
         model = User
 
     id = factory.Faker('uuid4')
-    username = factory.Faker('user_name')
+    username = factory.Faker('email')
     first_name = factory.Faker('first_name')
     last_name = factory.Faker('last_name')
     groups_ids = ()
     gpg_key = factory.SubFactory(GpgKeyFactory)
 
 
-class SharedSecretFactory(factory.Factory):
+class GpgUserFactory(UserFactory):
+    username = factory.Iterator(['john.doe', 'alicia.doe'])
+    gpg_key = factory.SubFactory(
+        GpgKeyFactory, fingerprint=factory.LazyAttribute(
+            lambda o: o.factory_parent.gpg.get_fingerprint(o.factory_parent.username)
+        ), armored_key=factory.LazyAttribute(lambda o: o.factory_parent.gpg.get_key(o.factory_parent.username))
+    )
+
+    class Params:
+        gpg = None
+
+
+class SecretFactory(factory.Factory):
     class Meta:
-        model = SharedSecret
+        model = Secret
 
     resource = factory.SubFactory(ResourceFactory)
-    user = factory.SubFactory(UserFactory)
-    permission_type = PermissionType.READ.value
+    recipient = factory.SubFactory(UserFactory)
     secret = factory.Faker('password')
+
+
+class PermissionFactory(factory.Factory):
+    class Meta:
+        model = Permission
+
+    resource = factory.SubFactory(ResourceFactory)
+    recipient = factory.SubFactory(UserFactory)
+    permission_type = PermissionType.OWNER.value
