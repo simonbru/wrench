@@ -18,9 +18,10 @@
 import functools
 import logging
 import os
+import re
 import sys
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Union
+from typing import Any, Callable, Dict, Iterable, List, Union
 
 import click
 import requests
@@ -30,11 +31,11 @@ from requests_gpgauthlib.utils import create_gpg, get_workdir, import_user_priva
 
 from .config import create_config, parse_config
 from .context import Context
-from .exceptions import DecryptionError, FingerprintMismatchError, HttpRequestError, ImportParseError
+from .exceptions import DecryptionError, FingerprintMismatchError, HttpRequestError, ImportParseError, ValidationError
 from .io import ask_question, input_recipients, split_csv
-from .models import Group, Resource, User
+from .models import Group, PermissionType, Resource, User
 from .passbolt_shell import PassboltShell
-from .resources import add_resource, decrypt_resource, search_resources, share_resource
+from .resources import add_resource, decrypt_resource, search_resources, share_resource, validate_resource
 from .services import get_groups, get_resources, get_users
 from .utils import encrypt, encrypt_for_user, obj_to_tuples
 from .validators import validate_http_url, validate_non_empty
@@ -54,9 +55,10 @@ def get_config_path() -> str:
     return config_file
 
 
-def get_session_from_ctx_obj(ctx_obj: Dict[str, Any]) -> GPGAuthSession:
+def get_session_from_ctx_obj(ctx_obj: Dict[str, Any], authenticate: bool = True) -> GPGAuthSession:
     """
-    Return a `GPGAuthSession` from the given click context object.
+    Return a `GPGAuthSession` from the given click context object. If `authenticate` is True, authentication will be
+    made against the API.
     """
     session = GPGAuthSession(
         gpg=ctx_obj['gpg'], server_url=ctx_obj['config']['auth']['server_url']
@@ -72,7 +74,8 @@ def get_session_from_ctx_obj(ctx_obj: Dict[str, Any]) -> GPGAuthSession:
             session.server_fingerprint, ctx_obj['config']['auth']['server_fingerprint']
         ))
 
-    session.authenticate()
+    if authenticate:
+        session.authenticate()
 
     return session
 
@@ -85,19 +88,17 @@ def get_context(ctx_obj: Dict[str, Any]) -> Context:
 
 
 def config_values_wizard() -> Dict[str, Any]:
-    mandatory_question = functools.partial(ask_question, processors=[validate_non_empty])
     auth_config = dict([
-        ('server_url', mandatory_question(label="Passbolt server URL (eg. https://passbolt.example.com)",
+        ('server_url', ask_question(label="Passbolt server URL (eg. https://passbolt.example.com)",
                                           processors=[validate_non_empty, validate_http_url])),
-        ('server_fingerprint', mandatory_question(label="Passbolt server fingerprint")),
+        ('server_fingerprint', ask_question(label="Passbolt server fingerprint", processors=[validate_non_empty])),
         ('http_username', ask_question(label="Username for HTTP auth")),
         ('http_password', ask_question(label="Password for HTTP auth", secret=True)),
     ])
     sharing_config = dict([
         ('default_recipients', ask_question(
-            label="Default recipients for resources (users e-mail addresses or group names, separated by commas)"
-            ))
-        ])
+            label="Default recipients for resources (users e-mail addresses or group names, separated by commas)"))
+    ])
 
     return {'auth': auth_config, 'sharing': sharing_config}
 
@@ -139,27 +140,61 @@ def get_recipient_by_name(name: str, context: Context) -> Union[Group, User]:
     return recipient
 
 
-def get_default_recipients(config: Dict[str, Any], context: Context) -> List[Union[Group, User]]:
+def str_to_recipients(recipients_str: str, context: Context) -> List[Union[Group, User]]:
     """
-    Return the config value `[sharing] default_recipients` as an iterable of `Group` and/or `User` objects. If any
-    recipient cannot be found in the list, a `KeyError` will be raised.
+    Take a string in the form "foo@bar.com, FooBar, bar@baz.com" and return the associated `User` and `Group` objects,
+    in the same order. If any recipient doesn't exist, `KeyError` will be raised.
     """
+    recipients = (recipient.strip() for recipient in recipients_str.split(','))
+    recipient_objs = [get_recipient_by_name(recipient, context) for recipient in recipients]
+
+    return recipient_objs
+
+
+def get_sharing_recipients(config: Dict, recipients_key: str, context: Context) -> List[Union[Group, User]]:
     try:
-        recipients = (
-            recipient.strip() for recipient in config['sharing']['default_recipients'].split(',')
-        )
+        recipients = config['sharing'][recipients_key]
     except KeyError:
-        recipient_objs = []  # type: List[Union[Group, User]]
+        recipients_list = []  # type: List[Union[Group, User]]
     else:
         try:
-            recipient_objs = [get_recipient_by_name(recipient, context) for recipient in recipients]
+            recipients_list = str_to_recipients(recipients, context)
         except KeyError as e:
             raise click.ClickException(
-                "Invalid default recipient %s. Please fix the value of the `default_recipients` setting in the"
+                "Invalid recipient %s. Please fix the value of the `default_recipients` setting in the"
                 " `[sharing]` section of your configuration file." % e
             )
 
-    return recipient_objs
+    return recipients_list
+
+
+def get_default_owners(config: Dict, context: Context) -> List[Union[Group, User]]:
+    return get_sharing_recipients(config, 'default_owners', context)
+
+
+def get_default_readers(config: Dict, context: Context) -> List[Union[Group, User]]:
+    return get_sharing_recipients(config, 'default_readers', context)
+
+
+def sharing_dialog(default_owners: List[Union[Group, User]], default_readers: List[Union[Group, User]],
+                   context: Context):
+    if default_owners:
+        click.secho("The resource will be owned by the following recipients: ", fg="yellow", nl=False)
+        click.echo(", ".join(str(recipient) for recipient in default_owners))
+    click.secho("Enter any other owner: ", nl=False)
+    new_owners = input_recipients(context.users, context.groups)
+    owners = [(recipient, PermissionType.OWNER) for recipient in default_owners + new_owners]
+
+    click.echo()
+
+    if default_readers:
+        click.secho("The resource will be readable by the following recipients: ", fg="yellow", nl=False)
+        click.echo(", ".join(str(recipient) for recipient in default_readers))
+    click.secho("Enter any other reader: ", nl=False)
+    new_readers = input_recipients(context.users, context.groups)
+    readers = [(recipient, PermissionType.READ) for recipient in default_readers + new_readers]
+
+    return owners + readers
 
 
 @click.group(context_settings={'help_option_names': ['-h', '--help']})
@@ -240,18 +275,23 @@ def add(ctx: Any) -> None:
     """
     context = get_context(ctx.obj)
     session = context.session
+
     # Get the list of recipients as soon as possible so that we can show an early error if it contains invalid
     # recipients
-    default_recipients = get_default_recipients(ctx.obj['config'], context)
+    get_default_owners(ctx.obj['config'], context)
+    get_default_readers(ctx.obj['config'], context)
 
     resource_record = dict([
-        ('name', ask_question(label="Name", processors=[validate_non_empty])), ('uri', ask_question(label="URI")),
-        ('description', ask_question(label="Description")), ('username', ask_question(label="Username")),
-        ('tags', ask_question(label="Tags (separated by commas, use # sign for public tags)", processors=[split_csv])),
+        ('name', ask_question(label="Name", processors=[validate_non_empty])),
+        ('username', ask_question(label="Username")),
+        ('secret', ask_question(label="Secret", secret=True, processors=[validate_non_empty])),
+        ('uri', ask_question(label="URI")),
+        ('description', ask_question(label="Description")),
+        ('tags', ask_question(label="Tags (separated by commas, prefix with # sign for public tags)",
+                              processors=[split_csv])),
     ])
-    secret = ask_question(label="Secret", secret=True, processors=[validate_non_empty])
 
-    resource = Resource(**dict(resource_record, id=None, secret=secret, encrypted_secret=None))
+    resource = Resource(**dict(resource_record, id=None, encrypted_secret=None))
 
     try:
         added_resource = add_resource(
@@ -263,17 +303,13 @@ def add(ctx: Any) -> None:
         raise click.ClickException("Error while adding resource: %s." % e.response.text)
 
     print_success("\nResource '{}' successfully saved.\n".format(resource_record['name']))
-    click.echo(
+    click.secho(
         "If you would like to share it, enter e-mail addresses or group names below, separated by commas."
-        " Auto completion through Tab key is supported."
+        " Auto completion through Tab key is supported.\n", fg="yellow"
     )
 
-    if default_recipients:
-        click.echo("The resource will also be shared with the following recipients: %s" % click.style(", ".join(
-            str(recipient) for recipient in default_recipients
-        ), fg='yellow'))
-
-    recipients = default_recipients + input_recipients(context.users, context.groups)
+    recipients = sharing_dialog(get_default_owners(ctx.obj['config'], context),
+                                get_default_readers(ctx.obj['config'], context), context)
 
     if recipients:
         try:
@@ -284,9 +320,9 @@ def add(ctx: Any) -> None:
             raise click.ClickException("Error while sharing resource: %s." % e.response.text)
         else:
             if recipients:
-                nb_groups = len([recipient for recipient in recipients if isinstance(recipient, Group)])
+                nb_groups = len([recipient for recipient in (recipients) if isinstance(recipient[0], Group)])
                 nb_users = len(recipients) - nb_groups
-                print_success("Resource successfully shared with {} users and {} groups.".format(nb_users, nb_groups))
+                print_success("\nResource successfully shared with {} users and {} groups.".format(nb_users, nb_groups))
 
 
 @cli.command()
@@ -330,12 +366,26 @@ def import_resources(ctx: Any, path: str, tag: List[str]) -> None:
             else:
                 yield host, username, password, description, product
 
+    tag = [('#' + t if not t.startswith('#') else t) for t in tag]
+
+    click.echo("Checking if file to import is valid... ")
+
     with open(path) as resource_file:
         resource_lines = resource_file.readlines()
 
+    resources = []
     try:
-        for resource in get_resources(resource_lines):
-            pass
+        # Start counting at line 2 because of the header line
+        for lineno, (host, username, password, description, product) in enumerate(get_resources(resource_lines), 2):
+            resource = Resource(id=None, uri=host, name=product, description=description, username=username,
+                                secret=password, encrypted_secret=None, tags=tag)
+
+            try:
+                validate_resource(resource)
+            except ValidationError as e:
+                raise click.ClickException("Error on line {}. {}".format(lineno, e))
+            else:
+                resources.append(resource)
     except ImportParseError as e:
         raise click.ClickException(
             "Could not split line {} of {} in 5 parts. Please check that it contains 4 tabs.".format(e.lineno, path)
@@ -344,28 +394,146 @@ def import_resources(ctx: Any, path: str, tag: List[str]) -> None:
     context = get_context(ctx.obj)
     click.echo(
         "If you would like to share the resources after import, enter e-mail addresses or group names below, separated"
-        " by commas. Auto completion through Tab key is supported."
+        " by commas. Auto completion through Tab key is supported.\n"
     )
-    default_recipients = get_default_recipients(ctx.obj['config'], context)
-    if default_recipients:
-        click.echo("The imported resources will also be shared with the following recipients: %s" %
-                   click.style(", ".join(str(recipient) for recipient in default_recipients), fg='yellow'))
+    recipients = sharing_dialog(get_default_owners(ctx.obj['config'], context),
+                                get_default_readers(ctx.obj['config'], context), context)
 
-    recipients = default_recipients + input_recipients(context.users, context.groups)
-    tag = [('#' + t if not t.startswith('#') else t) for t in tag]
-
-    for host, username, password, description, product in get_resources(resource_lines):
-        resource = Resource(id=None, uri=host, name=product, description=description, username=username,
-                            secret=password, encrypted_secret=None, tags=tag)
+    for resource in resources:
         new_resource = add_resource(
             resource,
             functools.partial(encrypt, fingerprint=context.session.user_fingerprint, gpg=ctx.obj['gpg']),
             context
         )
-        share_resource(new_resource, recipients, functools.partial(encrypt_for_user, gpg=ctx.obj['gpg']), context)
+        share_resource(new_resource, recipients, functools.partial(encrypt_for_user, gpg=ctx.obj['gpg']), context,
+                       delete_existing_permissions=True)
 
     nb_imported_resources = len(resource_lines) - 1
     click.echo("{} resources successfully imported.".format(nb_imported_resources))
+
+
+@cli.command()
+@click.pass_context
+def diagnose(ctx: Any):
+    """
+    Run various checks to test wrench installation status.
+    """
+    class DiagnoseError(Exception):
+        pass
+
+    def run_test(func: Callable, description: str) -> bool:
+        """
+        Run the given test function, show its description and the test result, and return True if the test run was
+        successful, or False otherwise.
+        """
+        try:
+            result = func()
+        except AssertionError as e:
+            result = str(e)
+            success = False
+        except Exception as e:
+            result = "Unexpected failure {}".format(e)
+            success = False
+        else:
+            success = True
+
+        prefix = "[{}] ".format(
+            click.style("OK", fg='green', bold=True) if success else click.style("KO", fg='red', bold=True)
+        )
+
+        result = (": " + result) if result else ""
+        click.echo(prefix + description + result)
+
+        return success
+
+    def wrench_version():
+        from . import __version__
+        return __version__
+
+    def python_gnupg_version():
+        from gnupg import __version__
+        return __version__
+
+    def requests_gpgauthlib_version():
+        from gpgauthlib import __version__
+        return __version__
+
+    def gnupg_version():
+        import subprocess
+        result = subprocess.run(['gpg', '--version'], stdout=subprocess.PIPE)
+        stdout = result.stdout.decode()
+        version_line = stdout.splitlines()[0]
+
+        matches = re.search(r'\d+\.\d+(\.\d+)?', version_line)
+        assert matches, "Unable to identify version number in " + version_line
+
+        import itertools
+        version_number = tuple(int(part) for part in matches.group(0).split('.'))
+        version_number += tuple(itertools.repeat(0, 3 - len(version_number)))
+
+        assert version_number >= (2, 1, 0), "gpg version should be >= 2.1.0"
+
+        return '.'.join(str(v) for v in version_number)
+
+    def test_secret_key():
+        secret_keys = ctx.obj['gpg'].list_keys(True)
+        assert len(secret_keys) == 1, "only one secret key should exist, found {}".format(len(secret_keys))
+        return secret_keys[0]['fingerprint']
+
+    def test_encryption():
+        secret_keys = ctx.obj['gpg'].list_keys(True)
+        # TODO check if no secret key
+        secret_key = secret_keys[0]
+        encrypted_data = ctx.obj['gpg'].encrypt('wrench', secret_key['fingerprint'], always_trust=True)
+        assert encrypted_data.ok, "unable to encrypt data ({})".format(encrypted_data.status)
+        decrypted_data = ctx.obj['gpg'].decrypt(str(encrypted_data))
+
+        assert decrypted_data.ok, "unable to decrypt data ({})".format(decrypted_data.status)
+        assert str(decrypted_data) == 'wrench', "decrypted data '{}' does not match original data 'wrench'".format(
+            str(decrypted_data)
+        )
+
+    def test_server_connection():
+        session = get_session_from_ctx_obj(ctx.obj, authenticate=False)
+
+        try:
+            server_fingerprint = session.server_fingerprint
+        except GPGAuthException as e:
+            raise AssertionError("could not verify server fingerprint ({})".format(e))
+        else:
+            expected_fingerprint = ctx.obj['config']['auth']['server_fingerprint']
+            assert server_fingerprint == expected_fingerprint, ("server fingerprint {} does not match expected"
+                                                                " fingerprint {}".format(server_fingerprint,
+                                                                                         expected_fingerprint))
+
+    def test_server_key():
+        server_key_fingerprint = ctx.obj['config']['auth']['server_fingerprint']
+        public_keys = ctx.obj['gpg'].list_keys()
+
+        assert server_key_fingerprint in {key['fingerprint'] for key in public_keys}, "server key not found in keychain"
+
+        return server_key_fingerprint
+
+    def test_server_encryption():
+        server_key_fingerprint = ctx.obj['config']['auth']['server_fingerprint']
+        encrypted_data = ctx.obj['gpg'].encrypt('wrench', server_key_fingerprint, always_trust=True)
+
+        assert encrypted_data.ok, "could not encrypt data with the server key {} ({})".format(
+            server_key_fingerprint, encrypted_data.status
+        )
+
+    tests = (
+        (wrench_version, "Wrench version"),
+        (python_gnupg_version, "python-gnupg version"),
+        (gnupg_version, "GnuPG version"),
+        (test_secret_key, "User secret key exists"),
+        (test_encryption, "Encryption/decryption using user key (passphrase dialog should open)"),
+        (test_server_connection, "Server connection"),
+        (test_server_key, "Server key exists"),
+        (test_server_encryption, "Encryption using server key"),
+    )
+    for func, description in tests:
+        run_test(func, description)
 
 
 @cli.command()

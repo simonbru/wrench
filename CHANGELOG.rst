@@ -8,10 +8,14 @@ dev
 
 - Split terms in ``search`` command and match them separately
 - Add groups support when sharing a resource
+- Allow to set owners and readers when sharing a resource
 - Allow setting default recipients in the configuration file
 - Add support for tags
 - Add ``import_resources`` command
 - Make HTTP authentication optional in config wizard
+- Add compatibility for Passbolt 2.2
+- Change questions order when adding a resource
+- Add ``diagnose`` command
 
 0.1.0 (2018-03-29)
 ------------------
