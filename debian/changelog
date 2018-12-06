@@ -1,3 +1,9 @@
+wrench (0.1.0-26-g298b4f1-1) unstable-ci; urgency=medium
+
+  * Sharing snapshot
+
+ -- Didier Raboud (Liip) <didier.raboud@liip.ch>  Thu, 06 Dec 2018 11:23:25 +0100
+
 wrench (0.1.0-1) unstable-ci; urgency=medium
 
   * Wrench 0.1.0 release
