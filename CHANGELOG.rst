@@ -1,14 +1,20 @@
 Changelog
 =========
 
-dev
----
+0.3.0 (2018-12-23)
+------------------
+
+**Improvements**
+
+- Allow to set owners and readers when sharing a resource
+
+0.2.0 (2018-12-21)
+------------------
 
 **Improvements**
 
 - Split terms in ``search`` command and match them separately
 - Add groups support when sharing a resource
-- Allow to set owners and readers when sharing a resource
 - Allow setting default recipients in the configuration file
 - Add support for tags
 - Add ``import_resources`` command
