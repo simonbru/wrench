@@ -3,7 +3,7 @@ Maintainer: The wrench developers <wrench@liip.ch>
 Uploaders: Didier 'OdyX' Raboud <odyx@liip.ch>
 Section: python
 Priority: optional
-Build-Depends: debhelper (>= 11~),
+Build-Depends: debhelper-compat (= 11),
                python3,
                python3-gnupg,
                python3-distutils,
